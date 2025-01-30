@@ -1,15 +1,21 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling
-from datasets import load_dataset
-import torch
 import json
+import torch
 import spacy
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Trainer,
+    TrainingArguments,
+    DataCollatorForLanguageModeling
+)
+from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
 
 # Initialize spaCy and tokenizer first
 nlp = spacy.load("en_core_web_sm")
 model_name = "gpt2-medium"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer.pad_token = tokenizer.eos_token  # Ensure pad_token is set
 
 # --- Enhanced Dataset with Memory Context ---
 expanded_dataset = [
@@ -36,7 +42,7 @@ expanded_dataset = [
 
 # Save and load dataset
 with open("data/intents.json", "w") as f:
-    json.dump(expanded_dataset, f)
+    json.dump(expanded_dataset, f, indent=2)
 
 dataset = load_dataset("json", data_files="data/intents.json")["train"]
 dataset = dataset.train_test_split(test_size=0.15)
@@ -74,11 +80,11 @@ class Assistant:
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
         self.tokenizer = tokenizer
         
-        # Initialize LoRA
+        # Initialize LoRA with corrected target_modules
         lora_config = LoraConfig(
             r=8,
             lora_alpha=32,
-            target_modules=["c_attn"],
+            target_modules=["attn.c_attn"],  # Corrected module path for GPT-2
             lora_dropout=0.1,
             bias="none"
         )
@@ -108,7 +114,7 @@ class Assistant:
         [History] {history}
         [User] {user_input}
         [Bot]""".strip()
-
+    
     def generate_response(self, user_input):
         # Update conversation context
         self.conversation_history.append(f"User: {user_input}")
@@ -141,7 +147,7 @@ data_collator = DataCollatorForLanguageModeling(
     mlm=False
 )
 
-# Update the TrainingArguments section
+# --- Training Arguments ---
 training_args = TrainingArguments(
     output_dir="./chatbot_model",
     num_train_epochs=20,
@@ -152,14 +158,13 @@ training_args = TrainingArguments(
     warmup_steps=100,
     fp16=True,
     logging_steps=50,
-    # Align these two strategies:
-    eval_strategy="steps",  # Changed from evaluation_strategy
+    eval_strategy="steps",  # Corrected from evaluation_strategy
     save_strategy="steps",
     eval_steps=200,
     save_steps=200,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
-    deepspeed="ds_config.json"
+    deepspeed="ds_config.json"  # Ensure this config is correct (see below)
 )
 
 assistant = Assistant()
