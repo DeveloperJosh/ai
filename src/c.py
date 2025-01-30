@@ -122,8 +122,8 @@ if __name__ == "__main__":
                 break
             response = bot.generate_response(
                 user_input,
-                temp=0.8,  # Higher = more creative
-                top_p=0.92  # Broader word selection
+                temp=5.0,  # Higher = more creative
+                top_p=5.0  # Broader word selection
             )
             print(f"AI: {response}")
     except KeyboardInterrupt:
