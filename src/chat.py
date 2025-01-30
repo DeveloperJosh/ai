@@ -9,7 +9,7 @@ lemmatizer = WordNetLemmatizer()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-with open('intents.json') as file:
+with open('data/intents.json') as file:
     intents = json.load(file)
 
 data = torch.load("chatbot_model.pth")
