@@ -1,161 +1,121 @@
+import numpy as np
 import torch
-import pandas as pd
+import torch.nn as nn
+import json
+import random
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from model import TextProcessor, TransformerChat
-import os
-import logging
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.serialization import add_safe_globals
-from collections import defaultdict
+import nltk
+nltk.download('punkt')
 
-logging.basicConfig(level=logging.INFO)
+# Preprocessing
+with open('data/intents.json') as file:
+    intents = json.load(file)
 
-class Config:
-    batch_size = 964
-    seq_length = 200
-    learning_rate = 0.0001
-    epochs = 600
-    data_path = "data/chatbot_data.csv"
-    checkpoint_path = "data/checkpoint.pth"
-    best_model_path = "data/best_model.pth"
-    dropout = 0.1
+all_words = []
+tags = []
+xy = []
 
+for intent in intents['intents']:
+    tag = intent['tag']
+    tags.append(tag)
+    for pattern in intent['patterns']:
+        w = nltk.word_tokenize(pattern)
+        all_words.extend(w)
+        xy.append((w, tag))
+
+ignore_words = ['?', '!', '.', ',']
+all_words = [nltk.stem.WordNetLemmatizer().lemmatize(w.lower()) for w in all_words if w not in ignore_words]
+all_words = sorted(set(all_words))
+tags = sorted(set(tags))
+
+# Create training data
+X_train = []
+y_train = []
+
+for (pattern_sentence, tag) in xy:
+    bag = [1 if word in pattern_sentence else 0 for word in all_words]
+    X_train.append(bag)
+    y_train.append(tags.index(tag))
+
+X_train = np.array(X_train)
+y_train = np.array(y_train)
+
+# Hyperparameters
+batch_size = 8
+input_size = len(X_train[0])
+hidden_size = 128
+output_size = len(tags)
+learning_rate = 0.001
+num_epochs = 1000
+
+# Dataset
 class ChatDataset(Dataset):
-    def __init__(self, questions, answers, processor):
-        self.processor = processor
-        self.pairs = list(zip(questions, answers))
-        self.seq_length = Config.seq_length
+    def __init__(self):
+        self.n_samples = len(X_train)
+        self.x_data = X_train
+        self.y_data = y_train
+
+    def __getitem__(self, index):
+        return self.x_data[index], self.y_data[index]
 
     def __len__(self):
-        return len(self.pairs)
+        return self.n_samples
 
-    def __getitem__(self, idx):
-        question, answer = self.pairs[idx]
+# Neural Network
+class NeuralNet(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(NeuralNet, self).__init__()
+        self.l1 = nn.Linear(input_size, hidden_size)
+        self.l2 = nn.Linear(hidden_size, hidden_size)
+        self.l3 = nn.Linear(hidden_size, output_size)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
         
-        def process_text(text):
-            seq = self.processor.text_to_sequence(text)
-            padded = seq[:self.seq_length] + [0]*(self.seq_length - len(seq))
-            return torch.LongTensor(padded)
+    def forward(self, x):
+        out = self.l1(x)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.l2(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.l3(out)
+        return out
 
-        return {
-            'question': process_text(question),
-            'answer': process_text(answer)
-        }
+# Training
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+dataset = ChatDataset()
+train_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True)
 
-def train():
-    # Load data
-    df = pd.read_csv(Config.data_path)
-    
-    # Initialize processor
-    processor = TextProcessor()
-    processor.build_vocab(pd.concat([df['Question'], df['Answer']]))
-    
-    # Split data
-    train_df, val_df = train_test_split(df, test_size=0.2, random_state=42)
-    
-    # Create datasets
-    train_dataset = ChatDataset(train_df['Question'], train_df['Answer'], processor)
-    val_dataset = ChatDataset(val_df['Question'], val_df['Answer'], processor)
+model = NeuralNet(input_size, hidden_size, output_size).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Create loaders
-    train_loader = DataLoader(train_dataset, batch_size=Config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=Config.batch_size)
-
-    # Model setup
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = TransformerChat(
-        processor.vocab_size,
-        dropout=Config.dropout
-    ).to(device)
-    
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=Config.learning_rate,
-        weight_decay=0.01
-    )
-    
-    # Scheduler
-    scheduler = ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5,
-        patience=5
-    )
-    
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=0, label_smoothing=0.1)
-
-    # Load checkpoint
-    start_epoch = 0
-    if os.path.exists(Config.checkpoint_path):
-        try:
-            add_safe_globals([defaultdict])
-            checkpoint = torch.load(
-                Config.checkpoint_path,
-                map_location=device,
-                weights_only=False
-            )
-            
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            processor.__setstate__(checkpoint)
-            start_epoch = checkpoint['epoch'] + 1
-            logging.info(f"Resuming from epoch {start_epoch}")
-        except Exception as e:
-            logging.error(f"Failed to load checkpoint: {str(e)}")
-            start_epoch = 0
-
-    # Training loop
-    best_val_loss = float('inf')
-    patience = 5
-    no_improvement = 0
-    
-    for epoch in range(start_epoch, Config.epochs):
-        model.train()
-        train_loss = 0
+for epoch in range(num_epochs):
+    for (words, labels) in train_loader:
+        words = words.float().to(device)
+        labels = labels.long().to(device)
         
-        for batch in train_loader:
-            src = batch['question'].to(device)
-            tgt = batch['answer'].to(device)
-            
-            outputs = model(src, tgt[:, :-1])
-            loss = criterion(outputs.view(-1, processor.vocab_size), tgt[:, 1:].reshape(-1))
-            
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            train_loss += loss.item()
+        outputs = model(words)
+        loss = criterion(outputs, labels)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    if (epoch+1) % 100 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
 
-        # Validation
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for batch in val_loader:
-                src = batch['question'].to(device)
-                tgt = batch['answer'].to(device)
-                outputs = model(src, tgt[:, :-1])
-                val_loss += criterion(outputs.view(-1, processor.vocab_size), tgt[:, 1:].reshape(-1)).item()
+print(f'Final loss: {loss.item():.4f}')
 
-        avg_val_loss = val_loss / len(val_loader)
-        scheduler.step(avg_val_loss)
+# Save model and data
+data = {
+    "model_state": model.state_dict(),
+    "input_size": input_size,
+    "output_size": output_size,
+    "hidden_size": hidden_size,
+    "all_words": all_words,
+    "tags": tags
+}
 
-        # Save checkpoint
-        state = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            **processor.__getstate__()
-        }
-        torch.save(state, Config.checkpoint_path)
-
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            torch.save(state, Config.best_model_path)
-
-        logging.info(f"Epoch {epoch+1}/{Config.epochs} | Loss: {train_loss/len(train_loader):.4f} | Val Loss: {avg_val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
-
-if __name__ == "__main__":
-    train()
+torch.save(data, "chatbot_model.pth")
+print(f'Training complete. Model saved to chatbot_model.pth')
