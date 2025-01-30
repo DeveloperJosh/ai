@@ -23,10 +23,10 @@ class Config:
     best_model_path = "data/best_model.pth"
     
     # Hyperparameters
-    batch_size = 64
-    seq_length = 50
+    batch_size = 164
+    seq_length = 100
     learning_rate = 0.0001
-    epochs = 10
+    epochs = 200
     dropout = 0.1
 
 ###############################################################################
