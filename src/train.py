@@ -21,6 +21,7 @@ PAD_TOKEN = '<PAD>'
 SOS_TOKEN = '<SOS>'
 EOS_TOKEN = '<EOS>'
 UNK_TOKEN = '<UNK>'
+SPECIAL_TOKENS = {PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN}
 
 # Hyperparameters
 BATCH_SIZE = 16
@@ -30,13 +31,13 @@ NUM_LAYERS = 2
 LEARNING_RATE = 0.001
 NUM_EPOCHS = 100
 TEACHER_FORCING_RATIO = 0.5
-MAX_LENGTH = 20  # Maximum length of response
+MAX_LENGTH = 20
 
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# Load intents.json with explicit encoding to prevent UnicodeDecodeError
+# Load intents.json
 with open('data/intents.json', 'r', encoding='utf-8') as file:
     intents = json.load(file)
 
@@ -49,28 +50,42 @@ for intent in intents['intents']:
     responses = intent['responses']
     for pattern in patterns:
         for response in responses:
-            # Tokenize and lemmatize input pattern
+            # Process input pattern
             input_words = nltk.word_tokenize(pattern)
-            input_words = [lemmatizer.lemmatize(word.lower()) for word in input_words if word not in set(['?', '!', '.', ','])]
+            input_words = [
+                lemmatizer.lemmatize(word.lower()) 
+                for word in input_words 
+                if word not in {'?', '!', '.', ','}
+            ]
             
-            # Tokenize and lemmatize response, then add <SOS> and <EOS>
+            # Process response
             output_words = nltk.word_tokenize(response)
-            output_words = [lemmatizer.lemmatize(word.lower()) for word in output_words if word not in set(['?', '!', '.', ','])]
-            output_words = [SOS_TOKEN] + output_words + [EOS_TOKEN]
+            output_words = [
+                lemmatizer.lemmatize(word.lower()) 
+                for word in output_words 
+                if word not in {'?', '!', '.', ','}
+            ]
+            # Add special tokens and exclude them from vocabulary
+            output_with_special = [SOS_TOKEN] + output_words + [EOS_TOKEN]
             
-            # Extend the word list and add the pair
-            all_words.extend(input_words)
-            all_words.extend(output_words)
-            pairs.append((input_words, output_words))
+            # Extend vocabulary (exclude special tokens)
+            all_words.extend([
+                word for word in input_words 
+                if word not in SPECIAL_TOKENS
+            ])
+            all_words.extend([
+                word for word in output_words 
+                if word not in SPECIAL_TOKENS
+            ])
+            
+            pairs.append((input_words, output_with_special))
 
-# Remove duplicates and sort the vocabulary
+# Create vocabulary (unique words + special tokens)
 all_words = sorted(set(all_words))
-
-# Create word2idx and idx2word mappings
-word2idx = {word: idx for idx, word in enumerate([PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + all_words)}
+vocab = [PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + all_words
+word2idx = {word: idx for idx, word in enumerate(vocab)}
 idx2word = {idx: word for word, idx in word2idx.items()}
-
-vocab_size = len(word2idx)
+vocab_size = len(vocab)
 print(f"Vocabulary Size: {vocab_size}")
 print(f"Total Pairs: {len(pairs)}")
 
@@ -110,6 +125,16 @@ def collate_fn(batch):
 # Create Dataset and DataLoader
 dataset = ChatDataset(pairs, word2idx)
 dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+
+# -- DEBUG STEP 1: Check dataset samples for out-of-range tokens before training.
+print("Checking dataset samples for out-of-range indices...")
+for i in range(len(dataset)):
+    inp, outp = dataset[i]
+    if (inp < 0).any() or (inp >= vocab_size).any():
+        print(f"[DEBUG] Found OOR in input at sample {i}:\n  {inp}")
+    if (outp < 0).any() or (outp >= vocab_size).any():
+        print(f"[DEBUG] Found OOR in output at sample {i}:\n  {outp}")
+print("Dataset check complete.")
 
 # Define the Encoder
 class Encoder(nn.Module):
@@ -218,8 +243,22 @@ for epoch in range(1, NUM_EPOCHS + 1):
         # Reshape for loss calculation
         # Exclude the first token (<SOS>) for both predictions and targets
         output_dim = output.shape[-1]
-        output = output[:, 1:].reshape(-1, output_dim)  # Shape: (batch_size * (trg_len -1), output_dim)
-        outputs = outputs[:, 1:].reshape(-1)  # Shape: (batch_size * (trg_len -1))
+        output = output[:, 1:].reshape(-1, output_dim)  # (batch_size*(trg_len-1), output_dim)
+        outputs = outputs[:, 1:].reshape(-1)            # (batch_size*(trg_len-1))
+        
+        # -- DEBUG STEP 2: Check for OOR in targets before loss
+        if outputs.min() < 0 or outputs.max() >= vocab_size:
+            print(
+                f"[DEBUG] Out-of-range index in target! "
+                f"Min: {outputs.min().item()}, Max: {outputs.max().item()}, "
+                f"Vocab size: {vocab_size}"
+            )
+        
+        print(
+            f"[DEBUG] Target min: {outputs.min().item()}, "
+            f"Target max: {outputs.max().item()}, "
+            f"Vocab size: {vocab_size}"
+        )
         
         # Calculate loss
         loss = criterion(output, outputs)
