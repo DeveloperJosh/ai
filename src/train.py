@@ -35,10 +35,10 @@ expanded_dataset = [
 ]
 
 # Save and load dataset
-with open("enhanced_dataset.json", "w") as f:
+with open("data/intents.json", "w") as f:
     json.dump(expanded_dataset, f)
 
-dataset = load_dataset("json", data_files="enhanced_dataset.json")["train"]
+dataset = load_dataset("json", data_files="data/intents.json")["train"]
 dataset = dataset.train_test_split(test_size=0.15)
 
 # --- Data Processing ---
@@ -141,19 +141,22 @@ data_collator = DataCollatorForLanguageModeling(
     mlm=False
 )
 
+# Update the TrainingArguments section
 training_args = TrainingArguments(
-    output_dir="./romantic_assistant_v1",
+    output_dir="./chatbot_model",
     num_train_epochs=20,
-    per_device_train_batch_size=8,  # Adjusted for stability
+    per_device_train_batch_size=8,
     per_device_eval_batch_size=8,
     gradient_accumulation_steps=2,
     learning_rate=2e-5,
     warmup_steps=100,
     fp16=True,
     logging_steps=50,
-    evaluation_strategy="steps",
+    # Align these two strategies:
+    eval_strategy="steps",  # Changed from evaluation_strategy
+    save_strategy="steps",
     eval_steps=200,
-    save_strategy="epoch",
+    save_steps=200,
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
     deepspeed="ds_config.json"
