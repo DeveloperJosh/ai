@@ -93,7 +93,9 @@ for epoch in range(num_epochs):
     optimizer.zero_grad()
     
     outputs, _ = model(X)
-    loss = criterion(outputs.view(-1, output_size), y)
+    # Fix the dimension mismatch by selecting the last output in the sequence
+    outputs = outputs[:, -1, :]  # Take the last timestep's output
+    loss = criterion(outputs, y)
     loss.backward()
     optimizer.step()
     
