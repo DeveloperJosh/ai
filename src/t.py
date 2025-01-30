@@ -8,6 +8,8 @@ import logging
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.serialization import add_safe_globals
 from collections import defaultdict
+from model import TextProcessor, TransformerChat
+#oka
 
 ###############################################################################
 #                             CONFIGURATION                                   #
