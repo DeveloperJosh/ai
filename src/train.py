@@ -11,6 +11,9 @@ from nltk.stem import WordNetLemmatizer
 nltk.download('punkt')
 nltk.download('wordnet')
 
+# Initialize device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 # Preprocessing
 with open('data/intents.json') as file:
     intents = json.load(file)
@@ -55,8 +58,8 @@ for (pattern_tokens, tag) in xy:
 # Pad sequences
 max_len = max(len(seq) for seq in X)
 X = [seq + [0] * (max_len - len(seq)) for seq in X]
-X = torch.tensor(X, dtype=torch.long)
-y = torch.tensor(y, dtype=torch.long)
+X = torch.tensor(X, dtype=torch.long).to(device)  # Move to device
+y = torch.tensor(y, dtype=torch.long).to(device)  # Move to device
 
 # Seq2Seq Model
 class Seq2Seq(nn.Module):
@@ -80,7 +83,7 @@ learning_rate = 0.001
 num_epochs = 1000
 
 # Initialize model, loss, and optimizer
-model = Seq2Seq(input_size, hidden_size, output_size).to(torch.device)
+model = Seq2Seq(input_size, hidden_size, output_size).to(device)  # Fixed device assignment
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
