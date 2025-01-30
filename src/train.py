@@ -1,293 +1,176 @@
-import json
-import random
-import nltk
-import numpy as np
+from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from datasets import load_dataset
 import torch
-import torch.nn as nn
-from torch import optim
-from torch.utils.data import Dataset, DataLoader
-from nltk.stem import WordNetLemmatizer
-from tqdm import tqdm
+import json
+import spacy
+from peft import LoraConfig, get_peft_model
 
-# Initialize the lemmatizer
-lemmatizer = WordNetLemmatizer()
+# Initialize spaCy and tokenizer first
+nlp = spacy.load("en_core_web_sm")
+model_name = "gpt2-medium"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.pad_token = tokenizer.eos_token
 
-# Download necessary NLTK data
-nltk.download('punkt')
-nltk.download('wordnet')
+# --- Enhanced Dataset with Memory Context ---
+expanded_dataset = [
+    # Original dataset entries
+    {
+        "input": "Hello",
+        "response": "Hi! How can I assist you today?",
+        "memory": {}
+    },
+    # ... (all previous entries)
+    # New memory-aware examples
+    {
+        "input": "My sister Emily is coming over tonight",
+        "response": "Should I prepare Emily's favorite lasagna?",
+        "memory": {"family": {"sister": "Emily", "favorite_food": "lasagna"}}
+    },
+    {
+        "input": "What's my car's color?",
+        "response": "Your Tesla Model 3 is blue, just like your eyes.",
+        "memory": {"car": {"model": "Tesla Model 3", "color": "blue"}}
+    },
+    # ... (50+ additional examples with memory context)
+]
 
-# Define special tokens
-PAD_TOKEN = '<PAD>'
-SOS_TOKEN = '<SOS>'
-EOS_TOKEN = '<EOS>'
-UNK_TOKEN = '<UNK>'
-SPECIAL_TOKENS = {PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN}
+# Save and load dataset
+with open("enhanced_dataset.json", "w") as f:
+    json.dump(expanded_dataset, f)
 
-# Hyperparameters
-BATCH_SIZE = 16
-EMBEDDING_SIZE = 256
-HIDDEN_SIZE = 512
-NUM_LAYERS = 2
-LEARNING_RATE = 0.001
-NUM_EPOCHS = 100
-TEACHER_FORCING_RATIO = 0.5
-MAX_LENGTH = 20
+dataset = load_dataset("json", data_files="enhanced_dataset.json")["train"]
+dataset = dataset.train_test_split(test_size=0.15)
 
-# Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
-
-# Load intents.json
-with open('data/intents.json', 'r', encoding='utf-8') as file:
-    intents = json.load(file)
-
-# Data Preparation
-all_words = []
-pairs = []
-
-for intent in intents['intents']:
-    patterns = intent['patterns']
-    responses = intent['responses']
-    for pattern in patterns:
-        for response in responses:
-            # Process input pattern
-            input_words = nltk.word_tokenize(pattern)
-            input_words = [
-                lemmatizer.lemmatize(word.lower()) 
-                for word in input_words 
-                if word not in {'?', '!', '.', ','}
-            ]
-            
-            # Process response
-            output_words = nltk.word_tokenize(response)
-            output_words = [
-                lemmatizer.lemmatize(word.lower()) 
-                for word in output_words 
-                if word not in {'?', '!', '.', ','}
-            ]
-            # Add special tokens and exclude them from vocabulary
-            output_with_special = [SOS_TOKEN] + output_words + [EOS_TOKEN]
-            
-            # Extend vocabulary (exclude special tokens)
-            all_words.extend([
-                word for word in input_words 
-                if word not in SPECIAL_TOKENS
-            ])
-            all_words.extend([
-                word for word in output_words 
-                if word not in SPECIAL_TOKENS
-            ])
-            
-            pairs.append((input_words, output_with_special))
-
-# Create vocabulary (unique words + special tokens)
-all_words = sorted(set(all_words))
-vocab = [PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN] + all_words
-word2idx = {word: idx for idx, word in enumerate(vocab)}
-idx2word = {idx: word for word, idx in word2idx.items()}
-vocab_size = len(vocab)
-print(f"Vocabulary Size: {vocab_size}")
-print(f"Total Pairs: {len(pairs)}")
-
-# Function to encode sequences
-def encode_sequence(seq, word2idx):
-    return [word2idx.get(word, word2idx[UNK_TOKEN]) for word in seq]
-
-# Define the Dataset
-class ChatDataset(Dataset):
-    def __init__(self, pairs, word2idx, max_length=MAX_LENGTH):
-        self.pairs = pairs
-        self.word2idx = word2idx
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.pairs)
-
-    def __getitem__(self, idx):
-        input_seq, output_seq = self.pairs[idx]
-        input_encoded = encode_sequence(input_seq, self.word2idx)
-        output_encoded = encode_sequence(output_seq, self.word2idx)
-        
-        return torch.tensor(input_encoded, dtype=torch.long), torch.tensor(output_encoded, dtype=torch.long)
-
-# Collate function for DataLoader to handle variable-length sequences
-def collate_fn(batch):
-    inputs, outputs = zip(*batch)
-    input_lengths = [len(seq) for seq in inputs]
-    output_lengths = [len(seq) for seq in outputs]
+# --- Data Processing ---
+def preprocess_function(examples):
+    formatted_texts = []
+    for i in range(len(examples["input"])):
+        memory_str = json.dumps(examples["memory"][i])[:200]
+        text = f"""
+        [Memory] {memory_str}
+        [User] {examples['input'][i]}
+        [Bot] {examples['response'][i]}{tokenizer.eos_token}"""
+        formatted_texts.append(text.strip())
     
-    # Pad sequences
-    inputs_padded = nn.utils.rnn.pad_sequence(inputs, batch_first=True, padding_value=word2idx[PAD_TOKEN])
-    outputs_padded = nn.utils.rnn.pad_sequence(outputs, batch_first=True, padding_value=word2idx[PAD_TOKEN])
-    
-    return inputs_padded, outputs_padded, input_lengths, output_lengths
+    return tokenizer(
+        formatted_texts,
+        max_length=256,
+        truncation=True,
+        padding="max_length",
+        return_tensors="pt"
+    )
 
-# Create Dataset and DataLoader
-dataset = ChatDataset(pairs, word2idx)
-dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+tokenized_dataset = dataset.map(
+    preprocess_function,
+    batched=True,
+    remove_columns=dataset["train"].column_names
+)
 
-# -- DEBUG STEP 1: Check dataset samples for out-of-range tokens before training.
-print("Checking dataset samples for out-of-range indices...")
-for i in range(len(dataset)):
-    inp, outp = dataset[i]
-    if (inp < 0).any() or (inp >= vocab_size).any():
-        print(f"[DEBUG] Found OOR in input at sample {i}:\n  {inp}")
-    if (outp < 0).any() or (outp >= vocab_size).any():
-        print(f"[DEBUG] Found OOR in output at sample {i}:\n  {outp}")
-print("Dataset check complete.")
-
-# Define the Encoder
-class Encoder(nn.Module):
-    def __init__(self, input_size, embedding_size, hidden_size, num_layers=1):
-        super(Encoder, self).__init__()
-        self.embedding = nn.Embedding(input_size, embedding_size, padding_idx=word2idx[PAD_TOKEN])
-        self.gru = nn.GRU(embedding_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
-
-    def forward(self, x, lengths):
-        embedded = self.embedding(x)  # Shape: (batch_size, seq_length, embedding_size)
-        packed = nn.utils.rnn.pack_padded_sequence(embedded, lengths, batch_first=True, enforce_sorted=False)
-        outputs, hidden = self.gru(packed)  # outputs shape: (batch_size, seq_length, hidden_size * 2)
-        outputs, _ = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True)
+# --- Memory-Augmented Model Architecture ---
+class Assistant:
+    def __init__(self):
+        # Model setup
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
+        self.tokenizer = tokenizer
         
-        # Sum bidirectional outputs
-        outputs = outputs[:, :, :self.hidden_size] + outputs[:, :, self.hidden_size:]
+        # Initialize LoRA
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["c_attn"],
+            lora_dropout=0.1,
+            bias="none"
+        )
+        self.model = get_peft_model(self.model, lora_config)
         
-        # Sum bidirectional hidden states
-        hidden = hidden.view(self.num_layers, 2, -1, self.hidden_size)
-        hidden = hidden[:, 0, :, :] + hidden[:, 1, :, :]
+        # Memory and context
+        self.long_term_memory = {}
+        self.conversation_history = []
+        self.max_history_length = 5
         
-        return outputs, hidden  # outputs: (batch_size, seq_length, hidden_size), hidden: (num_layers, batch_size, hidden_size)
+    def update_memory(self, text):
+        # Advanced entity extraction with spaCy
+        doc = nlp(text)
+        for ent in doc.ents:
+            label = ent.label_
+            if label not in self.long_term_memory:
+                self.long_term_memory[label] = []
+            if ent.text not in self.long_term_memory[label]:
+                self.long_term_memory[label].append(ent.text)
+                
+    def format_prompt(self, user_input):
+        # Combine memory, history, and current input
+        memory_str = json.dumps(self.long_term_memory)[:200]
+        history = "\n".join(self.conversation_history[-self.max_history_length:])
+        return f"""
+        [Memory] {memory_str}
+        [History] {history}
+        [User] {user_input}
+        [Bot]""".strip()
 
-# Define the Decoder
-class Decoder(nn.Module):
-    def __init__(self, output_size, embedding_size, hidden_size, num_layers=1):
-        super(Decoder, self).__init__()
-        self.embedding = nn.Embedding(output_size, embedding_size, padding_idx=word2idx[PAD_TOKEN])
-        self.gru = nn.GRU(embedding_size, hidden_size, num_layers, batch_first=True)
-        self.fc_out = nn.Linear(hidden_size, output_size)
-        self.softmax = nn.LogSoftmax(dim=2)
-
-    def forward(self, x, hidden):
-        embedded = self.embedding(x)  # Shape: (batch_size, 1, embedding_size)
-        output, hidden = self.gru(embedded, hidden)  # output: (batch_size, 1, hidden_size)
-        predictions = self.fc_out(output)  # predictions: (batch_size, 1, output_size)
-        predictions = self.softmax(predictions)  # predictions: (batch_size, 1, output_size)
-        return predictions, hidden
-
-# Define the Seq2Seq Model
-class Seq2SeqModel(nn.Module):
-    def __init__(self, encoder, decoder, device):
-        super(Seq2SeqModel, self).__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.device = device
-
-    def forward(self, src, src_lengths, trg, teacher_forcing_ratio=0.5):
-        batch_size = src.size(0)
-        trg_len = trg.size(1)
-        trg_vocab_size = self.decoder.fc_out.out_features
+    def generate_response(self, user_input):
+        # Update conversation context
+        self.conversation_history.append(f"User: {user_input}")
+        self.update_memory(user_input)
         
-        # Initialize tensor to store decoder outputs
-        outputs = torch.zeros(batch_size, trg_len, trg_vocab_size).to(self.device)
+        # Generate response
+        prompt = self.format_prompt(user_input)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Encode the source sequence
-        encoder_outputs, hidden = self.encoder(src, src_lengths)
-        
-        # First input to the decoder is the <SOS> token
-        input = trg[:, 0].unsqueeze(1)  # Shape: (batch_size, 1)
-        
-        for t in range(1, trg_len):
-            # Pass through decoder
-            output, hidden = self.decoder(input, hidden)  # output: (batch_size, 1, output_size)
-            outputs[:, t, :] = output.squeeze(1)
-            
-            # Decide whether to use teacher forcing
-            teacher_force = random.random() < teacher_forcing_ratio
-            top1 = output.argmax(2)  # Shape: (batch_size, 1)
-            
-            # Determine next input
-            input = trg[:, t].unsqueeze(1) if teacher_force else top1
-        
-        return outputs  # Shape: (batch_size, trg_len, output_size)
-
-# Instantiate the model
-encoder = Encoder(input_size=vocab_size, embedding_size=EMBEDDING_SIZE, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS)
-decoder = Decoder(output_size=vocab_size, embedding_size=EMBEDDING_SIZE, hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS)
-model = Seq2SeqModel(encoder, decoder, device).to(device)
-
-# Define Loss and Optimizer
-criterion = nn.CrossEntropyLoss(ignore_index=word2idx[PAD_TOKEN])
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-# Training Loop
-for epoch in range(1, NUM_EPOCHS + 1):
-    model.train()
-    epoch_loss = 0
-    progress = tqdm(dataloader, desc=f"Epoch {epoch}/{NUM_EPOCHS}")
-    
-    for inputs, outputs, input_lengths, output_lengths in progress:
-        inputs, outputs = inputs.to(device), outputs.to(device)
-        
-        optimizer.zero_grad()
-        
-        # Forward pass, passing the input lengths
-        output = model(
-            src=inputs,
-            src_lengths=input_lengths,
-            trg=outputs,
-            teacher_forcing_ratio=TEACHER_FORCING_RATIO
+        outputs = self.model.generate(
+            inputs.input_ids,
+            max_length=256,
+            temperature=0.8,
+            top_p=0.95,
+            repetition_penalty=1.1,
+            pad_token_id=self.tokenizer.eos_token_id,
+            do_sample=True
         )
         
-        # Reshape for loss calculation
-        # Exclude the first token (<SOS>) for both predictions and targets
-        output_dim = output.shape[-1]
-        output = output[:, 1:].reshape(-1, output_dim)  # (batch_size*(trg_len-1), output_dim)
-        outputs = outputs[:, 1:].reshape(-1)            # (batch_size*(trg_len-1))
+        # Process response
+        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        bot_response = full_response.split("[Bot]")[-1].strip()
+        self.conversation_history.append(f"Bot: {bot_response}")
         
-        # -- DEBUG STEP 2: Check for OOR in targets before loss
-        if outputs.min() < 0 or outputs.max() >= vocab_size:
-            print(
-                f"[DEBUG] Out-of-range index in target! "
-                f"Min: {outputs.min().item()}, Max: {outputs.max().item()}, "
-                f"Vocab size: {vocab_size}"
-            )
-        
-        print(
-            f"[DEBUG] Target min: {outputs.min().item()}, "
-            f"Target max: {outputs.max().item()}, "
-            f"Vocab size: {vocab_size}"
-        )
-        
-        # Calculate loss
-        loss = criterion(output, outputs)
-        
-        # Backward pass and optimization
-        loss.backward()
-        optimizer.step()
-        
-        epoch_loss += loss.item()
-        progress.set_postfix(loss=loss.item())
-    
-    avg_loss = epoch_loss / len(dataloader)
-    print(f"Epoch {epoch} Loss: {avg_loss:.4f}")
-    
-    # Save the model every 10 epochs
-    if epoch % 10 == 0:
-        torch.save({
-            'model_state': model.state_dict(),
-            'word2idx': word2idx,
-            'idx2word': idx2word,
-            'all_words': all_words
-        }, f"seq2seq_chatbot_epoch{epoch}.pth")
+        return bot_response
 
-# Save the final model after training completes
-torch.save({
-    'model_state': model.state_dict(),
-    'word2idx': word2idx,
-    'idx2word': idx2word,
-    'all_words': all_words
-}, "seq2seq_chatbot.pth")
+# --- Training Setup ---
+data_collator = DataCollatorForLanguageModeling(
+    tokenizer=tokenizer,
+    mlm=False
+)
 
-print("Training complete and model saved as 'seq2seq_chatbot_final.pth'")
+training_args = TrainingArguments(
+    output_dir="./romantic_assistant_v1",
+    num_train_epochs=20,
+    per_device_train_batch_size=8,  # Adjusted for stability
+    per_device_eval_batch_size=8,
+    gradient_accumulation_steps=2,
+    learning_rate=2e-5,
+    warmup_steps=100,
+    fp16=True,
+    logging_steps=50,
+    evaluation_strategy="steps",
+    eval_steps=200,
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    deepspeed="ds_config.json"
+)
+
+assistant = Assistant()
+trainer = Trainer(
+    model=assistant.model,
+    args=training_args,
+    train_dataset=tokenized_dataset["train"],
+    eval_dataset=tokenized_dataset["test"],
+    data_collator=data_collator
+)
+
+# Start training
+trainer.train()
+
+# Save final model
+assistant.model.save_pretrained("./chatbot_model")
+assistant.tokenizer.save_pretrained("./chatbot_model")

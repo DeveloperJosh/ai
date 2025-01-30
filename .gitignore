@@ -177,3 +177,4 @@ old_chatbot_data.csv
 .pyc
 chat1.py
 *.pth
+./data/chatbot_model
