@@ -87,4 +87,4 @@ if __name__ == "__main__":
         sentence = input("You: ")
         if sentence.lower() == "quit":
             break
-        print("Bot:", get_response(sentence))
+        print("AI:", get_response(sentence))
