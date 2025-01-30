@@ -12,14 +12,14 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 class Config:
-    batch_size = 64
-    seq_length = 50
-    learning_rate = 0.0002
-    epochs = 200
+    batch_size = 964
+    seq_length = 200
+    learning_rate = 0.0001
+    epochs = 600
     data_path = "data/chatbot_data.csv"
     checkpoint_path = "data/checkpoint.pth"
     best_model_path = "data/best_model.pth"
-    dropout = 0.2
+    dropout = 0.1
 
 class ChatDataset(Dataset):
     def __init__(self, questions, answers, processor):
@@ -141,17 +141,6 @@ def train():
 
         avg_val_loss = val_loss / len(val_loader)
         scheduler.step(avg_val_loss)
-
-        # Early stopping
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            no_improvement = 0
-        else:
-            no_improvement += 1
-            if no_improvement >= patience:
-                logging.info(f"Early stopping at epoch {epoch+1}")
-                break
-
 
         # Save checkpoint
         state = {
