@@ -10,12 +10,18 @@ from transformers import (
 )
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model
+import os
 
 # Initialize spaCy and tokenizer first
 nlp = spacy.load("en_core_web_sm")
 model_name = "gpt2-medium"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-tokenizer.pad_token = tokenizer.eos_token  # Ensure pad_token is set
+
+# Add a unique pad token if it doesn't exist
+if tokenizer.pad_token is None:
+    tokenizer.add_special_tokens({'pad_token': '<PAD>'})
+
+tokenizer.pad_token = '<PAD>'
 
 # --- Enhanced Dataset with Memory Context ---
 expanded_dataset = [
@@ -25,7 +31,7 @@ expanded_dataset = [
         "response": "Hi! How can I assist you today?",
         "memory": {}
     },
-    # ... (all previous entries)
+    # ... (add all previous entries here)
     # New memory-aware examples
     {
         "input": "My sister Emily is coming over tonight",
@@ -37,8 +43,11 @@ expanded_dataset = [
         "response": "Your Tesla Model 3 is blue, just like your eyes.",
         "memory": {"car": {"model": "Tesla Model 3", "color": "blue"}}
     },
-    # ... (50+ additional examples with memory context)
+    # ... (add 50+ additional examples with memory context)
 ]
+
+# Ensure the data directory exists
+os.makedirs("data", exist_ok=True)
 
 # Save and load dataset
 with open("data/intents.json", "w") as f:
@@ -53,9 +62,9 @@ def preprocess_function(examples):
     for i in range(len(examples["input"])):
         memory_str = json.dumps(examples["memory"][i])[:200]
         text = f"""
-        [Memory] {memory_str}
-        [User] {examples['input'][i]}
-        [Bot] {examples['response'][i]}{tokenizer.eos_token}"""
+[Memory] {memory_str}
+[User] {examples['input'][i]}
+[Bot] {examples['response'][i]}{tokenizer.eos_token}"""
         formatted_texts.append(text.strip())
     
     return tokenizer(
@@ -75,9 +84,16 @@ tokenized_dataset = dataset.map(
 # --- Memory-Augmented Model Architecture ---
 class Assistant:
     def __init__(self):
-        # Model setup
+        # Device setup
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+        
+        # Model setup
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
+        
+        # Resize token embeddings to accommodate the new pad token
+        self.model.resize_token_embeddings(len(tokenizer))
+        
         self.tokenizer = tokenizer
         
         # Initialize LoRA with corrected target_modules
@@ -97,7 +113,7 @@ class Assistant:
         
     def update_memory(self, text):
         # Advanced entity extraction with spaCy
-        doc = nlp(text)
+        doc = self.nlp(text)
         for ent in doc.ents:
             label = ent.label_
             if label not in self.long_term_memory:
@@ -107,13 +123,19 @@ class Assistant:
                 
     def format_prompt(self, user_input):
         # Combine memory, history, and current input
-        memory_str = json.dumps(self.long_term_memory)[:200]
+        memory_str = json.dumps(self.long_term_memory, indent=2)[:2000]  # Increased limit
         history = "\n".join(self.conversation_history[-self.max_history_length:])
         return f"""
-        [Memory] {memory_str}
-        [History] {history}
-        [User] {user_input}
-        [Bot]""".strip()
+[Memory]
+{memory_str}
+
+[History]
+{history}
+
+[User]
+{user_input}
+
+[Bot]""".strip()
     
     def generate_response(self, user_input):
         # Update conversation context
@@ -125,12 +147,14 @@ class Assistant:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
         outputs = self.model.generate(
-            inputs.input_ids,
-            max_length=256,
+            input_ids=inputs.input_ids,
+            attention_mask=inputs.attention_mask,  # Pass attention mask
+            max_length=inputs.input_ids.shape[1] + 256,  # Adjust max_length accordingly
             temperature=0.8,
             top_p=0.95,
             repetition_penalty=1.1,
-            pad_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,  # Use the new pad token ID
+            eos_token_id=self.tokenizer.eos_token_id,
             do_sample=True
         )
         

@@ -27,10 +27,18 @@ class Assistant:
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.tokenizer.pad_token = self.tokenizer.eos_token  # Ensure pad_token is set
+        
+        # Add a unique pad token if it doesn't exist
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.add_special_tokens({'pad_token': '<PAD>'})
+        
+        self.tokenizer.pad_token = '<PAD>'
 
         # Load base model
         self.model = AutoModelForCausalLM.from_pretrained(model_path).to(self.device)
+        
+        # Resize token embeddings to accommodate the new pad token
+        self.model.resize_token_embeddings(len(self.tokenizer))
 
         # Load PEFT (LoRA) model
         self.model = PeftModel.from_pretrained(self.model, model_path).to(self.device)
@@ -106,14 +114,15 @@ class Assistant:
         # Generate response
         with torch.no_grad():
             outputs = self.model.generate(
-                inputs.input_ids,
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,  # Pass attention mask
                 max_length=inputs.input_ids.shape[1] + max_length,
                 temperature=temperature,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
-                pad_token_id=self.tokenizer.eos_token_id,
-                do_sample=True,
-                eos_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.pad_token_id,  # Use the new pad token ID
+                eos_token_id=self.tokenizer.eos_token_id,
+                do_sample=True
             )
 
         # Decode and process response
