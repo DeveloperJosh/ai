@@ -9,7 +9,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 # Path to your fine-tuned GPT-2 model directory or a model name (e.g., "gpt2").
 # If you're using the base GPT-2 from the Hugging Face Hub, you can set MODEL_PATH = "gpt2"
-MODEL_PATH = "./gpt2"  # Change as needed
+MODEL_PATH = "gpt2"  # Change as needed
 
 # File to log conversations for offline learning/fine-tuning.
 LOG_FILE = "conversation_logs.json"
