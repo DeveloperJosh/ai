@@ -7,8 +7,9 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 # CONFIGURATION AND INITIAL SETUP
 # ===============================
 
-# Path to your fine-tuned GPT-2 model directory.
-MODEL_PATH = "gpt2"  # Change this to your model's directory
+# Path to your fine-tuned GPT-2 model directory or a model name (e.g., "gpt2").
+# If you're using the base GPT-2 from the Hugging Face Hub, you can set MODEL_PATH = "gpt2"
+MODEL_PATH = "./gpt2"  # Change as needed
 
 # File to log conversations for offline learning/fine-tuning.
 LOG_FILE = "conversation_logs.json"
@@ -22,15 +23,22 @@ model = GPT2LMHeadModel.from_pretrained(MODEL_PATH)
 model.to(device)
 model.eval()
 
-# Define the bot's persona (from Persona-Chat).
+# Ensure the tokenizer has a pad token. GPT-2 doesn't have one by default.
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# ===============================
+# SET UP THE BOT'S PERSONALITY & HISTORY
+# ===============================
+
+# Define the bot's persona (e.g., from Persona-Chat).
 persona = [
     "I am friendly and talkative.",
     "I love discussing interesting topics.",
     "I always try to understand the user."
 ]
 
-# Start conversation history with the persona.
-# This initial context helps condition the model.
+# Initialize conversation history with the bot's persona.
 conversation_history = [f"Persona: {' '.join(persona)}"]
 
 # ===============================
@@ -39,50 +47,52 @@ conversation_history = [f"Persona: {' '.join(persona)}"]
 
 def generate_response(user_input, history, max_history_turns=10):
     """
-    Appends the user's input to the conversation history, generates a response
-    using GPT-2, and then appends the bot's reply to the history.
-    
+    Appends the user's input to the conversation history, generates a response using GPT-2,
+    and then appends the bot's reply to the history.
+
     Args:
         user_input (str): The input string from the user.
         history (list): List of conversation turns.
         max_history_turns (int): Maximum number of turns (lines) to include in the prompt.
-        
+
     Returns:
         response (str): The generated response from the bot.
         history (list): Updated conversation history including the bot's response.
     """
     # Append user's message.
     history.append("User: " + user_input)
-    
+
     # Build the prompt using the most recent conversation turns.
-    # This helps keep the context within the model's token limit.
     prompt = "\n".join(history[-max_history_turns:]) + "\nBot:"
     input_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
-    
-    # Determine maximum length for generation, ensuring we do not exceed GPT-2's context window.
+
+    # Create an attention mask: ones for each token (since we're not padding within this prompt).
+    attention_mask = torch.ones(input_ids.shape, device=device)
+
+    # Determine maximum length for generation (keeping GPT-2's context window in mind).
     max_length = min(1024, input_ids.shape[1] + 100)
-    
-    # Generate the response.
+
+    # Generate the response using the attention mask.
     output_ids = model.generate(
         input_ids,
+        attention_mask=attention_mask,
         max_length=max_length,
         pad_token_id=tokenizer.eos_token_id,
-        do_sample=True,       # Enable sampling for creative responses.
-        top_k=50,             # Use top-k sampling.
-        top_p=0.95,           # Use nucleus (top-p) sampling.
-        temperature=0.7       # Adjust temperature for randomness.
+        do_sample=True,    # Enable sampling for creative responses.
+        top_k=50,          # Use top-k sampling.
+        top_p=0.95,        # Use nucleus (top-p) sampling.
+        temperature=0.7    # Adjust temperature for randomness.
     )
-    
+
     # Decode the generated output.
     output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    
-    # Extract the bot's response.
-    # We assume the model output follows the pattern and includes a "Bot:" marker.
+
+    # Extract the bot's response from the generated text.
     if "Bot:" in output_text:
         response = output_text.split("Bot:")[-1].strip()
     else:
         response = output_text.strip()
-    
+
     # Append the bot's response to the conversation history.
     history.append("Bot: " + response)
     return response, history
@@ -91,7 +101,7 @@ def save_conversation_log(history, filename=LOG_FILE):
     """
     Saves the conversation history to a JSON file.
     Each conversation is stored as a separate JSON object on a new line.
-    
+
     Args:
         history (list): The conversation history to save.
         filename (str): The filename where the conversation log is stored.
@@ -105,11 +115,11 @@ def save_conversation_log(history, filename=LOG_FILE):
 def load_previous_conversations(filename=LOG_FILE):
     """
     Loads previous conversation logs from the specified file.
-    (This can be useful for offline analysis or further fine-tuning.)
-    
+    This can be useful for offline analysis or further fine-tuning.
+
     Args:
         filename (str): The filename to load logs from.
-        
+
     Returns:
         conversations (list): A list of conversation logs.
     """
