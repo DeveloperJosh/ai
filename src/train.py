@@ -1,208 +1,148 @@
+import os
 import json
 import torch
-import spacy
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    Trainer,
-    TrainingArguments,
-    DataCollatorForLanguageModeling
-)
-from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
-import os
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
-# Initialize spaCy and tokenizer first
-nlp = spacy.load("en_core_web_sm")
-model_name = "gpt2-medium"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# ===============================
+# CONFIGURATION AND INITIAL SETUP
+# ===============================
 
-# Add a unique pad token if it doesn't exist
-if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({'pad_token': '<PAD>'})
+# Path to your fine-tuned GPT-2 model directory.
+MODEL_PATH = "./gpt2-persona-chat"  # Change this to your model's directory
 
-tokenizer.pad_token = '<PAD>'
+# File to log conversations for offline learning/fine-tuning.
+LOG_FILE = "conversation_logs.json"
 
-# --- Enhanced Dataset with Memory Context ---
-expanded_dataset = [
-    # Original dataset entries
-    {
-        "input": "Hello",
-        "response": "Hi! How can I assist you today?",
-        "memory": {}
-    },
-    # ... (add all previous entries here)
-    # New memory-aware examples
-    {
-        "input": "My sister Emily is coming over tonight",
-        "response": "Should I prepare Emily's favorite lasagna?",
-        "memory": {"family": {"sister": "Emily", "favorite_food": "lasagna"}}
-    },
-    {
-        "input": "What's my car's color?",
-        "response": "Your Tesla Model 3 is blue, just like your eyes.",
-        "memory": {"car": {"model": "Tesla Model 3", "color": "blue"}}
-    },
-    # ... (add 50+ additional examples with memory context)
+# Set device: use GPU if available, else CPU.
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load the tokenizer and model.
+tokenizer = GPT2Tokenizer.from_pretrained(MODEL_PATH)
+model = GPT2LMHeadModel.from_pretrained(MODEL_PATH)
+model.to(device)
+model.eval()
+
+# Define the bot's persona (from Persona-Chat).
+persona = [
+    "I am friendly and talkative.",
+    "I love discussing interesting topics.",
+    "I always try to understand the user."
 ]
 
-# Ensure the data directory exists
-os.makedirs("data", exist_ok=True)
+# Start conversation history with the persona.
+# This initial context helps condition the model.
+conversation_history = [f"Persona: {' '.join(persona)}"]
 
-# Save and load dataset
-with open("data/intents.json", "w") as f:
-    json.dump(expanded_dataset, f, indent=2)
+# ===============================
+# FUNCTION DEFINITIONS
+# ===============================
 
-dataset = load_dataset("json", data_files="data/intents.json")["train"]
-dataset = dataset.train_test_split(test_size=0.15)
-
-# --- Data Processing ---
-def preprocess_function(examples):
-    formatted_texts = []
-    for i in range(len(examples["input"])):
-        memory_str = json.dumps(examples["memory"][i])[:200]
-        text = f"""
-[Memory] {memory_str}
-[User] {examples['input'][i]}
-[Bot] {examples['response'][i]}{tokenizer.eos_token}"""
-        formatted_texts.append(text.strip())
+def generate_response(user_input, history, max_history_turns=10):
+    """
+    Appends the user's input to the conversation history, generates a response
+    using GPT-2, and then appends the bot's reply to the history.
     
-    return tokenizer(
-        formatted_texts,
-        max_length=256,
-        truncation=True,
-        padding="max_length",
-        return_tensors="pt"
+    Args:
+        user_input (str): The input string from the user.
+        history (list): List of conversation turns.
+        max_history_turns (int): Maximum number of turns (lines) to include in the prompt.
+        
+    Returns:
+        response (str): The generated response from the bot.
+        history (list): Updated conversation history including the bot's response.
+    """
+    # Append user's message.
+    history.append("User: " + user_input)
+    
+    # Build the prompt using the most recent conversation turns.
+    # This helps keep the context within the model's token limit.
+    prompt = "\n".join(history[-max_history_turns:]) + "\nBot:"
+    input_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
+    
+    # Determine maximum length for generation, ensuring we do not exceed GPT-2's context window.
+    max_length = min(1024, input_ids.shape[1] + 100)
+    
+    # Generate the response.
+    output_ids = model.generate(
+        input_ids,
+        max_length=max_length,
+        pad_token_id=tokenizer.eos_token_id,
+        do_sample=True,       # Enable sampling for creative responses.
+        top_k=50,             # Use top-k sampling.
+        top_p=0.95,           # Use nucleus (top-p) sampling.
+        temperature=0.7       # Adjust temperature for randomness.
     )
-
-tokenized_dataset = dataset.map(
-    preprocess_function,
-    batched=True,
-    remove_columns=dataset["train"].column_names
-)
-
-# --- Memory-Augmented Model Architecture ---
-class Assistant:
-    def __init__(self):
-        # Device setup
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {self.device}")
-        
-        # Model setup
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
-        
-        # Resize token embeddings to accommodate the new pad token
-        self.model.resize_token_embeddings(len(tokenizer))
-        
-        self.tokenizer = tokenizer
-        
-        # Initialize LoRA with corrected target_modules
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=32,
-            target_modules=["attn.c_attn"],  # Corrected module path for GPT-2
-            lora_dropout=0.1,
-            bias="none"
-        )
-        self.model = get_peft_model(self.model, lora_config)
-        
-        # Memory and context
-        self.long_term_memory = {}
-        self.conversation_history = []
-        self.max_history_length = 5
-        
-    def update_memory(self, text):
-        # Advanced entity extraction with spaCy
-        doc = self.nlp(text)
-        for ent in doc.ents:
-            label = ent.label_
-            if label not in self.long_term_memory:
-                self.long_term_memory[label] = []
-            if ent.text not in self.long_term_memory[label]:
-                self.long_term_memory[label].append(ent.text)
-                
-    def format_prompt(self, user_input):
-        # Combine memory, history, and current input
-        memory_str = json.dumps(self.long_term_memory, indent=2)[:2000]  # Increased limit
-        history = "\n".join(self.conversation_history[-self.max_history_length:])
-        return f"""
-[Memory]
-{memory_str}
-
-[History]
-{history}
-
-[User]
-{user_input}
-
-[Bot]""".strip()
     
-    def generate_response(self, user_input):
-        # Update conversation context
-        self.conversation_history.append(f"User: {user_input}")
-        self.update_memory(user_input)
+    # Decode the generated output.
+    output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    # Extract the bot's response.
+    # We assume the model output follows the pattern and includes a "Bot:" marker.
+    if "Bot:" in output_text:
+        response = output_text.split("Bot:")[-1].strip()
+    else:
+        response = output_text.strip()
+    
+    # Append the bot's response to the conversation history.
+    history.append("Bot: " + response)
+    return response, history
+
+def save_conversation_log(history, filename=LOG_FILE):
+    """
+    Saves the conversation history to a JSON file.
+    Each conversation is stored as a separate JSON object on a new line.
+    
+    Args:
+        history (list): The conversation history to save.
+        filename (str): The filename where the conversation log is stored.
+    """
+    log_entry = {"conversation": history}
+    with open(filename, "a", encoding="utf-8") as f:
+        json.dump(log_entry, f)
+        f.write("\n")
+    print(f"Conversation log saved to {filename}.")
+
+def load_previous_conversations(filename=LOG_FILE):
+    """
+    Loads previous conversation logs from the specified file.
+    (This can be useful for offline analysis or further fine-tuning.)
+    
+    Args:
+        filename (str): The filename to load logs from.
         
-        # Generate response
-        prompt = self.format_prompt(user_input)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        
-        outputs = self.model.generate(
-            input_ids=inputs.input_ids,
-            attention_mask=inputs.attention_mask,  # Pass attention mask
-            max_length=inputs.input_ids.shape[1] + 256,  # Adjust max_length accordingly
-            temperature=0.8,
-            top_p=0.95,
-            repetition_penalty=1.1,
-            pad_token_id=self.tokenizer.pad_token_id,  # Use the new pad token ID
-            eos_token_id=self.tokenizer.eos_token_id,
-            do_sample=True
-        )
-        
-        # Process response
-        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        bot_response = full_response.split("[Bot]")[-1].strip()
-        self.conversation_history.append(f"Bot: {bot_response}")
-        
-        return bot_response
+    Returns:
+        conversations (list): A list of conversation logs.
+    """
+    if not os.path.exists(filename):
+        return []
+    conversations = []
+    with open(filename, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                conversations.append(entry)
+            except json.JSONDecodeError:
+                continue
+    return conversations
 
-# --- Training Setup ---
-data_collator = DataCollatorForLanguageModeling(
-    tokenizer=tokenizer,
-    mlm=False
-)
+# ===============================
+# MAIN INTERACTIVE CHAT LOOP
+# ===============================
 
-# --- Training Arguments ---
-training_args = TrainingArguments(
-    output_dir="./chatbot_model",
-    num_train_epochs=20,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
-    gradient_accumulation_steps=2,
-    learning_rate=2e-5,
-    warmup_steps=100,
-    fp16=True,
-    logging_steps=50,
-    eval_strategy="steps",  # Corrected from evaluation_strategy
-    save_strategy="steps",
-    eval_steps=200,
-    save_steps=200,
-    load_best_model_at_end=True,
-    metric_for_best_model="eval_loss",
-    deepspeed="ds_config.json"  # Ensure this config is correct (see below)
-)
+def main():
+    print("Chat with the bot! Type 'quit' or 'exit' to end the conversation.")
+    try:
+        while True:
+            user_input = input("You: ")
+            if user_input.lower() in ["quit", "exit"]:
+                print("Exiting conversation. Saving conversation log...")
+                save_conversation_log(conversation_history)
+                break
+            response, updated_history = generate_response(user_input, conversation_history)
+            print("Bot:", response)
+    except KeyboardInterrupt:
+        print("\nKeyboardInterrupt detected. Exiting and saving conversation log...")
+        save_conversation_log(conversation_history)
 
-assistant = Assistant()
-trainer = Trainer(
-    model=assistant.model,
-    args=training_args,
-    train_dataset=tokenized_dataset["train"],
-    eval_dataset=tokenized_dataset["test"],
-    data_collator=data_collator
-)
-
-# Start training
-trainer.train()
-
-# Save final model
-assistant.model.save_pretrained("./chatbot_model")
-assistant.tokenizer.save_pretrained("./chatbot_model")
+if __name__ == "__main__":
+    main()
