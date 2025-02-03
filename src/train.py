@@ -8,7 +8,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 # ===============================
 
 # Path to your fine-tuned GPT-2 model directory.
-MODEL_PATH = "./gpt2-persona-chat"  # Change this to your model's directory
+MODEL_PATH = "gpt2"  # Change this to your model's directory
 
 # File to log conversations for offline learning/fine-tuning.
 LOG_FILE = "conversation_logs.json"
